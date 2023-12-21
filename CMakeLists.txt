@@ -1,6 +1,7 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.16)
 project(hashiru)
 
+set(CMAKE_CXX_FLAGS -pthread)
 set(TARGET ${CMAKE_PROJECT_NAME})
 set(CMAKE_CXX_STANDARD 20)
 set(FILES src/main.cpp)
