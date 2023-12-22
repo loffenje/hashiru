@@ -33,10 +33,15 @@ using TF_Pair = std::pair<std::string, f32>;
 
 std::vector<TF_Pair> take(const std::vector<TF_Pair> &data, u32 size) {
     std::vector<TF_Pair> result;
-    result.reserve(size);
+    if (!data.empty()) {
+        u32 data_size = static_cast<u32>(data.size());
+        size = std::min(data_size, size);
 
-    for (u32 i = 0; i < size; i++) {
-        result.emplace_back(data[i]);
+        result.reserve(size);
+
+        for (u32 i = 0; i < size; i++) {
+            result.emplace_back(data[i]);
+        }
     }
 
     return result;

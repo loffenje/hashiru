@@ -15,9 +15,9 @@ using f32 = float;
 using TermFreq = std::unordered_map<std::string, u32>;
 using Index = std::unordered_map<std::string, TermFreq>;
 
-#include "utils.h"
 #include "httplib.h"
 #include "lexer.h"
+#include "utils.h"
 
 namespace fs = std::filesystem;
 
@@ -59,6 +59,8 @@ void run_index_command(const char *dir) {
 
     Index index;
 
+    TermFreq common_term_freq;
+
     for (const auto &dir_entry : fs::recursive_directory_iterator(root)) {
         std::string content;
         std::string path = dir_entry.path().string();
@@ -68,22 +70,33 @@ void run_index_command(const char *dir) {
             continue;
         }
 
-        TermFreq term_freq;
+        TermFreq doc_term_freq;
 
         Lexer lexer(content);
         while (!lexer.is_end()) {
             auto token = lexer.next_token();
 
-            auto it = term_freq.find(token);
-            if (it != term_freq.end()) {
+            auto it = doc_term_freq.find(token);
+            if (it != doc_term_freq.end()) {
                 it->second++;
             } else {
-                term_freq.insert({token, 1});
+                doc_term_freq.insert({token, 1});
             }
         }
 
-        index.insert({path, term_freq});
+        for (const auto &[term, _] : doc_term_freq) {
+            auto it = common_term_freq.find(term);
+            if (it != common_term_freq.end()) {
+                it->second++;
+            } else {
+                common_term_freq.insert({term, 1});
+            }
+        }
+
+        index.insert({path, doc_term_freq});
     }
+
+    index.insert({".", common_term_freq});
 
     export_index_to_vars("index.vars", index);
 }
@@ -102,7 +115,7 @@ void serve_static_file(const char *filename, const char *content_type, httplib::
     }
 }
 
-f32 tf(const std::string &t, const TermFreq &d) {
+f32 compute_tf(const std::string &t, const TermFreq &d) {
     f32 result = 0.0f;
     f32 a = 0.0f;
 
@@ -118,12 +131,11 @@ f32 tf(const std::string &t, const TermFreq &d) {
     return result;
 }
 
-f32 idf(const std::string &t, const Index &d) {
-    u32 N = d.size();
+f32 compute_idf(const std::string &t, const TermFreq &common_tf) {
+    u32 N = 0;
     u32 sum = 0;
-
-    for (const auto &[_, tf_map] : d) {
-        if (tf_map.contains(t)) sum++;
+    if (auto it = common_tf.find(t); it != common_tf.cend()) {
+        N = it->second;
     }
 
     N = std::max(N, 1u);
@@ -134,6 +146,35 @@ f32 idf(const std::string &t, const Index &d) {
     return result;
 }
 
+std::string search(const std::string &request, const Index &index) {
+    std::vector<std::pair<std::string, f32>> data;
+
+    auto common_tf_it = index.find(".");
+    if (common_tf_it == index.end()) abort("Invalid document imported. '.' is required for common tf");
+
+    const TermFreq &common_tf = common_tf_it->second;
+    for (const auto &[path, d] : index) {
+        Lexer lexer(request);
+        f32 rank = 0.0f;
+        while (!lexer.is_end()) {
+            auto token = lexer.next_token();
+            f32 tf_idf = compute_tf(token, d) * compute_idf(token, common_tf);
+
+            rank += tf_idf;
+        }
+
+        data.push_back({path, rank});
+    }
+
+    std::sort(data.begin(), data.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
+
+    data = take(data, 20);
+
+    std::string response = to_json_buf(data);
+
+    return response;
+}
+
 void set_router(httplib::Server &server, const Index &index) {
     server.set_error_handler([](const auto &req, auto &res) {
         auto fmt = "<p>Error Status: <span style='color:red;'>%d</span></p>";
@@ -142,35 +183,17 @@ void set_router(httplib::Server &server, const Index &index) {
         res.set_content(buf, "text/html");
     });
 
-    server.Post("/api/search", [&](const httplib::Request &req, httplib::Response &res,
-                                   const httplib::ContentReader &content_reader) {
-        std::string body;
-        content_reader([&](const char *data, size_t len) {
-            body.append(data, len);
-            return true;
-        });
+    server.Post("/api/search",
+                [&](const httplib::Request &req, httplib::Response &res, const httplib::ContentReader &content_reader) {
+                    std::string body;
+                    content_reader([&](const char *data, size_t len) {
+                        body.append(data, len);
+                        return true;
+                    });
 
-        std::vector<std::pair<std::string, f32>> data;
-        for (const auto &[path, d] : index) {
-            Lexer lexer(body);
-            f32 rank = 0.0f;
-            while (!lexer.is_end()) {
-                auto token = lexer.next_token();
-                f32 tf_idf = tf(token, d) * idf(token, index);
-
-                rank += tf_idf;
-            }
-
-            data.push_back({path, rank});
-        }
-
-        std::sort(data.begin(), data.end(), [](const auto &a, const auto &b) { return a.second > b.second; });
-
-        data = take(data, 20);
-
-        std::string json = to_json_buf(data);
-        res.set_content(json, "application/json");
-    });
+                    auto json = search(body, index);
+                    res.set_content(json, "application/json");
+                });
 
     server.Get("/index.js", [](const httplib::Request &, httplib::Response &res) {
         serve_static_file("assets/index.js", "application/javascript", res);
